@@ -3,32 +3,29 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import re
 import nltk
+import os
+import pickle
+
 from nltk.corpus import stopwords
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import SVC
 
 # =========================
-# KONFIGURASI DASHBOARD
-# =========================
-st.set_page_config(
-    page_title="Sentimen Analisis YouTube",
-    layout="wide"
-)
-
-st.title("📊 Dashboard Sentimen Analisis Komentar YouTube")
-st.markdown("""
-**Metode:**  
-Auto Sentiment Labeling berbasis kamus kata (Lexicon-Based)
-""")
-
-st.divider()
-
-# =========================
-# NLTK STOPWORDS
+# SETUP
 # =========================
 nltk.download("stopwords")
 stop_words = stopwords.words("indonesian")
 
+st.set_page_config(page_title="Sentimen Analisis YouTube", layout="wide")
+st.title(" Dashboard Sentimen Analisis Komentar YouTube (ML Auto)")
+st.markdown("""
+**Metode:** Lexicon-Based + TF-IDF + SVM  
+**Preprocessing:** Case Folding, Cleaning, Stopword Removal
+""")
+st.divider()
+
 # =========================
-# LOAD KAMUS POSITIF & NEGATIF
+# LOAD KAMUS
 # =========================
 def load_lexicon(file):
     with open(file, "r", encoding="utf-8") as f:
@@ -44,11 +41,11 @@ def clean_text(text):
     text = str(text).lower()
     text = re.sub(r"http\S+", "", text)
     text = re.sub(r"[^a-z\s]", "", text)
-    text = " ".join([w for w in text.split() if w not in stop_words])
-    return text
+    tokens = [w for w in text.split() if w not in stop_words]
+    return " ".join(tokens)
 
 # =========================
-# AUTO SENTIMENT LABELING
+# AUTO LABEL (LEXICON)
 # =========================
 def auto_label(text):
     score = 0
@@ -57,7 +54,6 @@ def auto_label(text):
             score += 1
         elif word in negative_words:
             score -= 1
-
     if score > 0:
         return "positif"
     elif score < 0:
@@ -66,55 +62,78 @@ def auto_label(text):
         return "netral"
 
 # =========================
-# DASHBOARD UPLOAD FILE
+# MODEL FILE
 # =========================
-st.subheader("📂 Upload File CSV Komentar YouTube")
-uploaded_file = st.file_uploader(
-    "Pilih file CSV dari komputer",
-    type=["csv"]
-)
+MODEL_FILE = "svm_model.pkl"
+VECT_FILE = "tfidf.pkl"
+
+# =========================
+# TRAIN MODEL
+# =========================
+def train_model(df):
+    df["clean_text"] = df["textDisplay"].apply(clean_text)
+    df["sentiment"] = df["clean_text"].apply(auto_label)
+
+    tfidf = TfidfVectorizer()
+    X = tfidf.fit_transform(df["clean_text"])
+    y = df["sentiment"]
+
+    svm_model = SVC(kernel="linear")
+    svm_model.fit(X, y)
+
+    with open(VECT_FILE, "wb") as f:
+        pickle.dump(tfidf, f)
+    with open(MODEL_FILE, "wb") as f:
+        pickle.dump(svm_model, f)
+
+    return tfidf, svm_model
+
+# =========================
+# UPLOAD CSV
+# =========================
+st.subheader(" Upload File CSV Komentar YouTube")
+uploaded_file = st.file_uploader("Pilih file CSV", type=["csv"])
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
 
     if "textDisplay" not in df.columns:
-        st.error("❌ Kolom 'textDisplay' tidak ditemukan")
+        st.error(" Kolom 'textDisplay' tidak ditemukan")
         st.stop()
-    else:
-        st.success(f"✅ File berhasil dibaca ({len(df)} komentar)")
 
-        if st.button("🔍 Analisis Sentimen"):
-            with st.spinner("Menganalisis komentar..."):
-                df["clean_text"] = df["textDisplay"].apply(clean_text)
-                df["sentiment"] = df["clean_text"].apply(auto_label)
+    st.success(f" File berhasil dibaca ({len(df)} komentar)")
 
-            st.success("🎉 Analisis selesai")
+    if st.button(" Analisis Sentimen"):
+        with st.spinner("Menganalisis komentar..."):
+            if not os.path.exists(MODEL_FILE):
+                tfidf, svm_model = train_model(df)
+            else:
+                with open(VECT_FILE, "rb") as f:
+                    tfidf = pickle.load(f)
+                with open(MODEL_FILE, "rb") as f:
+                    svm_model = pickle.load(f)
 
-            # =========================
-            # TABEL HASIL
-            # =========================
-            st.subheader("📋 Hasil Analisis Sentimen")
-            st.dataframe(
-                df[["authorDisplayName", "textDisplay", "sentiment"]],
-                use_container_width=True
-            )
+            df["clean_text"] = df["textDisplay"].apply(clean_text)
+            X_new = tfidf.transform(df["clean_text"])
+            df["sentiment"] = svm_model.predict(X_new)
 
-            # =========================
-            # PIE CHART
-            # =========================
-            st.subheader("🥧 Distribusi Sentimen (%)")
-            sent_ratio = df["sentiment"].value_counts(normalize=True) * 100
-            sent_ratio = sent_ratio.round(2)
+        st.success(" Analisis selesai")
 
-            fig, ax = plt.subplots()
-            ax.pie(sent_ratio, labels=sent_ratio.index, autopct="%1.1f%%", startangle=90)
-            ax.axis("equal")
-            st.pyplot(fig)
+        st.subheader(" Hasil Analisis")
+        st.dataframe(df[["authorDisplayName", "textDisplay", "sentiment"]])
 
-            # =========================
-            # METRIC BOX
-            # =========================
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Positif (%)", sent_ratio.get("positif", 0))
-            c2.metric("Negatif (%)", sent_ratio.get("negatif", 0))
-            c3.metric("Netral (%)", sent_ratio.get("netral", 0))
+        st.subheader(" Distribusi Sentimen (%)")
+        sent_ratio = df["sentiment"].value_counts(normalize=True) * 100
+
+        fig, ax = plt.subplots()
+        ax.pie(sent_ratio, labels=sent_ratio.index, autopct="%1.1f%%", startangle=90)
+        ax.axis("equal")
+        st.pyplot(fig)
+
+        st.download_button(
+            "⬇ Download Hasil CSV",
+            df.to_csv(index=False),
+            "hasil_sentimen.csv",
+            "text/csv"
+        )
+
